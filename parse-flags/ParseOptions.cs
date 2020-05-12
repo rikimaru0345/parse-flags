@@ -6,14 +6,29 @@ using System.Text;
 
 namespace ParseFlags
 {
+	public enum NameMatchingMode
+	{
+		Disabled,
+		Exact,
+		CaseInsensitive
+	}
+
 	public class ParseOptions
 	{
 		internal readonly List<(Type targetType, object converter)> _customConverters = new List<(Type, object)>();
 
+		// -
+		public NameMatchingMode MatchByPropertyName { get; set; } = NameMatchingMode.CaseInsensitive;
+		
+		// -
+		public NameMatchingMode MatchByAttributeName { get; set; } = NameMatchingMode.Exact;
 
-		// - MatchByAttribute: Disabled, Exact, CaseInsensitive
-		// - MatchByPropertyName: Disabled, Exact, CaseInsensitive
-		public bool AllowCaseInsensitiveMatching { get; set; } = false;
+		// -
+		public NameMatchingMode EnumMatchByName { get; set; } = NameMatchingMode.CaseInsensitive;
+
+		// -
+		public NameMatchingMode EnumMatchByAttributeName { get; set; } = NameMatchingMode.CaseInsensitive;
+
 
 		// - 
 		public Action<Arg>? OnUnmatchedArgument { get; set; } = null;

@@ -48,19 +48,31 @@ namespace demo_console
 		public int Port { get; set; } = 90;
 	}
 
-	enum LogLevel { Debug, Info, Warn, Error }
+	enum LogLevel
+	{
+		Debug,
+
+		[EnumOption("Information")]
+		Info,
+
+		[EnumOption("Warning")]
+		Warn,
+
+		[EnumOption("Err")]
+		Error
+	}
 
 
 	class Program
 	{
 		static void Main(string[] args)
 		{
-			if(args.Length == 0)
+			if (args.Length == 0)
 				args = new[] {
 					"--configPath=conf.yaml",
 					"--HistogramBuckets=1,2,3,4,5,6",
 
-					"--logger.level=warn",
+					"--logger.level=err",
 
 					"--login.enabled=true",
 					"--login.port=6666",
