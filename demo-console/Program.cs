@@ -60,7 +60,7 @@ namespace demo_console
 					"--configPath=conf.yaml",
 					"--HistogramBuckets=1,2,3,4,5,6",
 
-					"--logger.level=Warn",
+					"--logger.level=warn",
 
 					"--login.enabled=true",
 					"--login.port=6666",

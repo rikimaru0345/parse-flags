@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable enable
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -101,22 +102,24 @@ namespace ParseFlags
 				}
 
 				if (props.Length == 0)
-					// todo: "got arg that didn't match any properties!"
-					// todo: "did you mean ___" (case-insensitive check)
+				{
+					ctx.Options.OnUnmatchedArgument?.Invoke(argGroup.First());
 					continue;
+				}
+
 
 				var prop = props[0];
 				var propType = prop.PropertyType;
 
 				// Actual value
 				var arg = argGroup.First(); // if there are more: warn that this prop is not an object
-				if (TryConvert(arg.Value, propType, out object result))
+				if (TryConvert(ctx, arg, propType, out object result))
 				{
 					prop.SetValue(ctx.Target, result);
 					arg.SetConsumed(ctx, prop);
 					continue;
 				}
-				
+
 				// Sub object
 				if (propType.IsClass)
 				{
@@ -124,7 +127,7 @@ namespace ParseFlags
 					object subObj = prop.GetValue(ctx.Target);
 					if (subObj == null)
 					{
-						subObj = Activator.CreateInstance(propType); // todo: maybe add support for a user-provided factory method?
+						subObj = ctx.Options.OnCreateObject(propType);
 						prop.SetValue(ctx.Target, subObj);
 					}
 
@@ -142,9 +145,19 @@ namespace ParseFlags
 			}
 		}
 
-		static bool TryConvert(string value, Type targetType, out object result)
+		static bool TryConvert(Context ctx, Arg arg, Type targetType, out object result)
 		{
-			// todo: allow user-provided converters
+			var value = arg.Value;
+
+			// User provided converters
+			foreach (var t in ctx.Options._customConverters)
+				if (targetType.IsAssignableFrom(t.targetType))
+					if (t.converter.CanConvert(arg))
+					{
+						result = t.converter.Parse(value);
+						return true;
+					}
+
 
 			// String
 			if (targetType == typeof(string))
@@ -183,7 +196,9 @@ namespace ParseFlags
 				var ar = Array.CreateInstance(elementType, strValues.Length);
 				for (int i = 0; i < strValues.Length; i++)
 				{
-					if (TryConvert(strValues[i], elementType, out object element))
+					var elementArg = Arg.CreateForArrayElement(arg, strValues[i]);
+
+					if (TryConvert(ctx, elementArg, elementType, out object element))
 						ar.SetValue(element, i);
 					else
 						throw new InvalidCastException($"Error while converting array element to type \"{elementType.FullName}\". Index: [{i}]. SourceValue: \"{strValues[i]}\"");
@@ -218,7 +233,7 @@ namespace ParseFlags
 		}
 	}
 
-	class Arg
+	public class Arg
 	{
 		public readonly string Raw;         // original argument:	 "--a.b.c=123"
 		public readonly string RawTrimmed;  //						 "a.b.c=123"
@@ -226,9 +241,9 @@ namespace ParseFlags
 		public readonly string[] Path;      // key split by '.':	 [ "a", "b", "c" ]
 		public readonly string Value;       // value:				 "123"
 
-		string consumedBy;
-		public bool IsConsumed { get => consumedBy != null; }
-		public void SetConsumed(Context ctx, PropertyInfo prop)
+		string? consumedBy;
+		internal bool IsConsumed { get => consumedBy != null; }
+		internal void SetConsumed(Context ctx, PropertyInfo prop)
 		{
 			var propertyNamePath = ctx.CurrentPath.Concat(new[] { prop.Name });
 			var path =
@@ -247,7 +262,7 @@ namespace ParseFlags
 		}
 
 
-		public Arg(string raw, string rawTrim, string key, string[] path, string value)
+		internal Arg(string raw, string rawTrim, string key, string[] path, string value)
 		{
 			Raw = raw;
 			RawTrimmed = rawTrim;
@@ -255,5 +270,8 @@ namespace ParseFlags
 			Path = path;
 			Value = value;
 		}
+
+		internal static Arg CreateForArrayElement(Arg arrayArg, string elementValue)
+			=> new Arg(arrayArg.Raw, arrayArg.RawTrimmed, arrayArg.Key, arrayArg.Path, elementValue);
 	}
 }
