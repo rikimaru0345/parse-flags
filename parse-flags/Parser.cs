@@ -8,23 +8,40 @@ namespace ParseFlags
 {
 	class Context
 	{
-		public object RootTarget { get; }
-		public Stack<(object obj, PropertyInfo parentProp)> TargetObjects { get; }
-		public ParseOptions Options { get; }
-		public Arg[] Args { get; }
+		readonly Stack<(object obj, PropertyInfo parentProp, string[] path)> _targets = new Stack<(object, PropertyInfo, string[])>();
+		readonly List<string> _targetNames = new List<string>();
 
-		public int Depth => TargetObjects.Count;
-		public object Target => TargetObjects.Count == 0 ? RootTarget : TargetObjects.Peek().obj;
-		public object TargetName => TargetObjects.Count == 0 ? "" : TargetObjects.Peek().parentProp.Name;
+		public object RootTarget { get; }
+		public ParseOptions Options { get; }
+		public Arg[] AllArgs { get; }
+
+		public int Depth => _targets.Count;
+		public object Target => _targets.Count == 0 ? RootTarget : _targets.Peek().obj;
+		public object TargetName => _targets.Count == 0 ? "" : _targets.Peek().parentProp.Name;
+		public string[] CurrentPath { get; private set; } // path of property names
 
 		public Context(object rootTarget, ParseOptions options, Arg[] args)
 		{
 			RootTarget = rootTarget;
-			TargetObjects = new Stack<(object obj, PropertyInfo parentProp)>();
 			Options = options ?? new ParseOptions();
-			Args = args;
+			AllArgs = args;
+			CurrentPath = Array.Empty<string>();
 		}
 
+		public void Push(object newTarget, PropertyInfo prop)
+		{
+			_targets.Push((newTarget, prop, CurrentPath));
+
+			_targetNames.Add(prop.Name);
+			CurrentPath = _targetNames.ToArray();
+		}
+
+		public void Pop()
+		{
+			var t = _targets.Pop(); // ascend again
+			_targetNames.RemoveAt(_targetNames.Count - 1);
+			CurrentPath = t.path; // restore old path
+		}
 	}
 
 	public static class Parser
@@ -52,18 +69,23 @@ namespace ParseFlags
 
 		static void AssignProperties(Context ctx)
 		{
-			foreach (var arg in ctx.Args)
+			// Find relevant args for this level
+			var groups = ctx.AllArgs
+				.Where(a => a.Path.Length > ctx.Depth) // only keep args at same depth or below
+				.Where(a => // only keep args in same namespace as we're currently in
+				{
+					for (int i = 0; i <= ctx.Depth && i < ctx.CurrentPath.Length; i++)
+						if (!string.Equals(a.Path[i], ctx.CurrentPath[i], StringComparison.OrdinalIgnoreCase))
+							return false;
+					return true;
+				})
+				.GroupBy(a => a.Path[ctx.Depth]) // for objects, only set them once at this level
+				.ToArray();
+
+			foreach (var argGroup in groups)
 			{
-				// Can't be a match since the name is still too "deep"
-				if (ctx.Depth >= arg.Path.Length)
-					continue;
-
-				// Matching namespace?
-				// todo: ctx.Args.Zip(arg.Key)
-
-
 				// Find property that matches the name
-				var propName = arg.Path[ctx.Depth];
+				var propName = argGroup.Key;
 				var props = ctx.Target
 					.GetType()
 					.GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -75,7 +97,7 @@ namespace ParseFlags
 				{
 					var propIdentifiers = props.Select(p => $"({p.PropertyType.Name} {p.Name})");
 					var propsStr = string.Join(", ", propIdentifiers);
-					throw new InvalidOperationException($"Ambiguous match! The argument \"{arg.Key}\" matches multiple properties: ");
+					throw new InvalidOperationException($"Ambiguous match! The argument \"{argGroup.Key}\" matches multiple properties: ");
 				}
 
 				if (props.Length == 0)
@@ -84,49 +106,40 @@ namespace ParseFlags
 					continue;
 
 				var prop = props[0];
-				SetProp(ctx, prop, arg);
-			}
-		}
+				var propType = prop.PropertyType;
 
-		static void SetProp(Context ctx, PropertyInfo prop, Arg arg)
-		{
-			var propType = prop.PropertyType;
-
-			// Actual values
-			if (TryConvert(arg.Value, propType, out object result))
-			{
-				prop.SetValue(ctx.Target, result);
-				arg.SetConsumed(ctx, prop);
-				return;
-			}
-
-			// Sub object
-			if (propType.IsClass)
-			{
-				// Ensure the arg isn't trying to set the object itself
-				if(arg.Path.Length == ctx.Depth)
-					throw new InvalidOperationException($"Argument path \"{arg.Key}\" is invalid because it points to an object! Did you misspell the argument name, or did you mean to access one of the properties inside property \"{prop.Name}\" (PropType=\"{propType.FullName}\")?");
-
-				// Get or create object
-				object subObj = prop.GetValue(ctx.Target);
-				if (subObj == null)
+				// Actual value
+				var arg = argGroup.First(); // if there are more: warn that this prop is not an object
+				if (TryConvert(arg.Value, propType, out object result))
 				{
-					subObj = Activator.CreateInstance(propType); // todo: maybe add support for a user-provided factory method?
-					prop.SetValue(ctx.Target, subObj);
+					prop.SetValue(ctx.Target, result);
+					arg.SetConsumed(ctx, prop);
+					continue;
+				}
+				
+				// Sub object
+				if (propType.IsClass)
+				{
+					// Get or create object
+					object subObj = prop.GetValue(ctx.Target);
+					if (subObj == null)
+					{
+						subObj = Activator.CreateInstance(propType); // todo: maybe add support for a user-provided factory method?
+						prop.SetValue(ctx.Target, subObj);
+					}
+
+					ctx.Push(subObj, prop);
+					AssignProperties(ctx);
+					ctx.Pop();
+					continue;
 				}
 
-				// 
-
-				AssignProperties(depth + 1, subObj, args);
-
-				return;
+				throw new InvalidOperationException($"Cannot handle property type!\n" +
+					$"PropertyType: {prop.PropertyType.FullName}\n" +
+					$"Argument: {argGroup.Key}\n" +
+					$"PropertyName: {prop.Name}\n" +
+					$"DeclaringType: {prop.DeclaringType.FullName}");
 			}
-
-			throw new InvalidOperationException($"Cannot handle property type!\n" +
-				$"PropertyType: {prop.PropertyType.FullName}\n" +
-				$"Argument: {arg.Key}\n" +
-				$"PropertyName: {prop.Name}\n" +
-				$"DeclaringType: {prop.DeclaringType.FullName}");
 		}
 
 		static bool TryConvert(string value, Type targetType, out object result)
@@ -140,10 +153,22 @@ namespace ParseFlags
 				return true;
 			}
 
-			// Bool, Int, Float, Enum, DateTime,  ...
+			// Bool, Int, Float, DateTime,  ...
 			if (targetType.IsPrimitive || targetType == typeof(DateTime) || targetType == typeof(decimal))
 			{
 				result = Convert.ChangeType(value, targetType);
+				return true;
+			}
+
+			// Enum
+			if (targetType.IsEnum)
+			{
+				// Try to find enum value by attribute, name, or value
+				var enumValue = Enum.Parse(targetType, value, true);
+				if (enumValue == null)
+					throw new InvalidCastException($"Given value \"{value}\" cannot be converted to enum type \"{targetType.FullName}\"");
+
+				result = enumValue;
 				return true;
 			}
 
@@ -158,7 +183,7 @@ namespace ParseFlags
 				var ar = Array.CreateInstance(elementType, strValues.Length);
 				for (int i = 0; i < strValues.Length; i++)
 				{
-					if(TryConvert(strValues[i], elementType, out object element))
+					if (TryConvert(strValues[i], elementType, out object element))
 						ar.SetValue(element, i);
 					else
 						throw new InvalidCastException($"Error while converting array element to type \"{elementType.FullName}\". Index: [{i}]. SourceValue: \"{strValues[i]}\"");
@@ -205,14 +230,18 @@ namespace ParseFlags
 		public bool IsConsumed { get => consumedBy != null; }
 		public void SetConsumed(Context ctx, PropertyInfo prop)
 		{
-			var path = $"(Type={prop.PropertyType.FullName} Name={prop.Name} Path={string.Join(".", propertyNamePath)} DeclaringType={prop.DeclaringType.FullName})";
+			var propertyNamePath = ctx.CurrentPath.Concat(new[] { prop.Name });
+			var path =
+				$"Path: {string.Join(".", propertyNamePath)}\n" +
+				$"PropertyType: {prop.PropertyType.Name}\n" +
+				$"DeclaringType: {prop.DeclaringType.Name}";
 
 			if (consumedBy != null)
 				throw new InvalidOperationException(
 					$"Trying to consume argument again!\n" +
-					$"Argument: \"{Key}\"\n" +
-					$"Already consumed by: \"{consumedBy}\"\n" +
-					$"New contending consumer: \"{path}\"");
+					$"Argument: \"{Key}\"\n\n" +
+					$"New contending consumer:\n{path}\n\n" +
+					$"Already consumed by:\n{consumedBy}");
 
 			consumedBy = path;
 		}

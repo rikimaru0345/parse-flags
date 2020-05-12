@@ -25,9 +25,9 @@ namespace demo_console
 	class Options
 	{
 		public string ConfigPath { get; set; }
-		public double[] HistogramBuckets {get;set;} = new double[]{ 1, 5, 10, 50, 100, 500, 1000 };
+		public double[] HistogramBuckets { get; set; } = new double[] { 1, 5, 10, 50, 100, 500, 1000 };
 		public LogOptions Logger { get; set; }
-		public ServerOptions Server {get;set;}
+		public ServerOptions Server { get; set; }
 		public LoginOptions Login { get; set; }
 	}
 
@@ -59,15 +59,14 @@ namespace demo_console
 				args = new[] {
 					"--configPath=conf.yaml",
 					"--HistogramBuckets=1,2,3,4,5,6",
-					
+
 					"--logger.level=Warn",
-					
-					"--server.port=5555",
 
 					"--login.enabled=true",
 					"--login.port=6666",
 					"--login.servers=localhost,google.com,github.com",
 
+					"--server.port=5555",
 				};
 
 			var options = Parser.Parse<Options>(args);
