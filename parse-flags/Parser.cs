@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using ParseFlags.Converters;
 
 namespace ParseFlags
 {
@@ -47,9 +48,14 @@ namespace ParseFlags
 
 	public static class Parser
 	{
+		static readonly IArgConverter[] BuiltInConverters = new IArgConverter[] {
+			new StringConverter(),
+			new PrimitiveConverter(),
+			new EnumConverter(),
+		};
+
 		public static T Parse<T>(string[] args, ParseOptions? options = null) where T : class
 			=> Parse<T>(args, options, null);
-
 
 		public static T Parse<T>(string[] args, ParseOptions? options, T? existingObject) where T : class
 		{
@@ -58,9 +64,14 @@ namespace ParseFlags
 
 			T target = existingObject ?? Activator.CreateInstance<T>();
 
-			var pairs = ArgsToKeyValuePairs(args);
+
+			var (pairs, errors) = ArgsToKeyValuePairs(args);
 
 			var ctx = new Context(target, options, pairs);
+
+			if (errors.Length > 0)
+				ctx.Options.OnMalformedArgument?.Invoke(pairs, errors);
+
 
 			AssignProperties(ctx);
 
@@ -92,6 +103,7 @@ namespace ParseFlags
 					.GetProperties(BindingFlags.Public | BindingFlags.Instance)
 					.Where(p => p.CanWrite)
 					.Where(p => IsNameMatch(ctx, p, propName))
+					.Where(p => ctx.Options.RequireOptionAttribute ? p.GetCustomAttribute<OptionAttribute>() != null : true)
 					.ToArray();
 
 				if (props.Length > 1)
@@ -113,7 +125,7 @@ namespace ParseFlags
 
 				// Actual value
 				var arg = argGroup.First(); // if there are more: warn that this prop is not an object
-				if (TryConvert(ctx, arg, propType, out object? result))
+				if (TryConvert(ctx, arg, prop, propType, out object? result))
 				{
 					prop.SetValue(ctx.Target, result);
 					arg.SetConsumed(ctx, prop);
@@ -145,45 +157,27 @@ namespace ParseFlags
 			}
 		}
 
-		static bool TryConvert(Context ctx, Arg arg, Type targetType, out object? result)
+		static bool TryConvert(Context ctx, Arg arg, PropertyInfo prop, Type targetType, out object? result)
 		{
 			var value = arg.Value;
 
+			var converterContext = new ConverterContext
+			{
+				ParseOptions = ctx.Options,
+				Arg = arg,
+				TargetProperty = prop,
+				TargetType = targetType
+			};
+
 			// User provided converters
 			foreach (var t in ctx.Options._customConverters)
-				if (targetType.IsAssignableFrom(t.targetType))
-					if (t.converter.CanConvert(arg))
-					{
-						result = t.converter.Parse(value);
-						return true;
-					}
+				if (t.converter.TryConvert(converterContext, arg, out result))
+					return true;
 
-
-			// String
-			if (targetType == typeof(string))
-			{
-				result = value;
-				return true;
-			}
-
-			// Bool, Int, Float, DateTime,  ...
-			if (targetType.IsPrimitive || targetType == typeof(DateTime) || targetType == typeof(decimal))
-			{
-				result = Convert.ChangeType(value, targetType);
-				return true;
-			}
-
-			// Enum
-			if (targetType.IsEnum)
-			{
-				// Try to find enum value by attribute, name, or value
-				var enumValue = ResolveEnum(ctx, targetType, value);
-				if (enumValue == null)
-					throw new InvalidCastException($"Given value \"{value}\" cannot be converted to enum type \"{targetType.FullName}\"");
-
-				result = enumValue;
-				return true;
-			}
+			// Built in converters
+			foreach (var c in BuiltInConverters)
+				if (c.TryConvert(converterContext, arg, out result))
+					return true;
 
 			// Array
 			if (targetType.IsArray)
@@ -198,7 +192,7 @@ namespace ParseFlags
 				{
 					var elementArg = Arg.CreateForArrayElement(arg, strValues[i]);
 
-					if (TryConvert(ctx, elementArg, elementType, out object? element))
+					if (TryConvert(ctx, elementArg, prop, elementType, out object? element))
 						ar.SetValue(element, i);
 					else
 						throw new InvalidCastException($"Error while converting array element to type \"{elementType.FullName}\". Index: [{i}]. SourceValue: \"{strValues[i]}\"");
@@ -214,11 +208,11 @@ namespace ParseFlags
 
 		static bool IsNameMatch(Context ctx, PropertyInfo prop, string targetName)
 		{
-			if (ctx.Options.MatchByPropertyName == NameMatchingMode.Exact)
+			if (ctx.Options.MatchPropertyByName == NameMatchingMode.Exact)
 				if (prop.Name == targetName)
 					return true;
 
-			if (ctx.Options.MatchByPropertyName == NameMatchingMode.CaseInsensitive)
+			if (ctx.Options.MatchPropertyByName == NameMatchingMode.CaseInsensitive)
 				if (string.Equals(prop.Name, targetName, StringComparison.OrdinalIgnoreCase))
 					return true;
 
@@ -226,11 +220,11 @@ namespace ParseFlags
 			var op = prop.GetCustomAttribute<OptionAttribute>();
 			if (op != null)
 			{
-				if (ctx.Options.MatchByAttributeName == NameMatchingMode.Exact)
+				if (ctx.Options.MatchPropertyByAttribute == NameMatchingMode.Exact)
 					if (op.Name == targetName)
 						return true;
 
-				if (ctx.Options.MatchByAttributeName == NameMatchingMode.CaseInsensitive)
+				if (ctx.Options.MatchPropertyByAttribute == NameMatchingMode.CaseInsensitive)
 					if (string.Equals(op.Name, targetName, StringComparison.OrdinalIgnoreCase))
 						return true;
 			}
@@ -238,59 +232,35 @@ namespace ParseFlags
 			return false;
 		}
 
-		static object? ResolveEnum(Context ctx, Type enumType, string value)
+
+		static (Arg[], string[] errors) ArgsToKeyValuePairs(string[] args)
 		{
-			Array values = Enum.GetValues(enumType);
-			foreach (var enumValue in values)
-			{
-				var decimalStr = Enum.Format(enumType, enumValue, "d");
-				if (decimalStr == value)
-					return enumValue;
+			var parsedArgs = new List<Arg>();
+			var errors = new List<string>();
 
-				var enumName = Enum.Format(enumType, enumValue, "f");
-				if (ctx.Options.EnumMatchByName == NameMatchingMode.Exact)
-					if (enumName == value)
-						return enumValue;
-
-				if (ctx.Options.EnumMatchByName == NameMatchingMode.CaseInsensitive)
-					if (string.Equals(enumName, value, StringComparison.OrdinalIgnoreCase))
-						return enumValue;
-
-				var enumValueField = enumType.GetField(enumName);
-				var nameAttribute = Attribute.GetCustomAttribute(enumValueField, typeof(EnumOptionAttribute)) as EnumOptionAttribute;
-				if (nameAttribute != null)
-				{
-					if (ctx.Options.EnumMatchByAttributeName == NameMatchingMode.Exact)
-						if (nameAttribute.Name == value)
-							return enumValue;
-
-					if (ctx.Options.EnumMatchByAttributeName == NameMatchingMode.CaseInsensitive)
-						if (string.Equals(nameAttribute.Name, value, StringComparison.OrdinalIgnoreCase))
-							return enumValue;
-				}
-			}
-
-			return null;
-		}
-
-
-		static Arg[] ArgsToKeyValuePairs(string[] args)
-		{
-			return args.Select(rawArg =>
+			foreach (var rawArg in args)
 			{
 				// Remove leading dashes
 				var arg = rawArg.TrimStart('-');
 
 				// Split name and value
 				var split = arg.Split(new[] { '=' }, 2, StringSplitOptions.None);
+				if (split.Length != 2)
+				{
+					errors.Add("Cannot split argument by '=' into name and value: " + arg);
+					continue;
+				}
+
 				var key = split[0].Trim();
 				var value = split[1].Trim();
 
 				// Split name by '.'
 				var path = key.Split('.');
 
-				return new Arg(rawArg, arg, key, path, value);
-			}).ToArray();
+				parsedArgs.Add(new Arg(rawArg, arg, key, path, value));
+			}
+
+			return (parsedArgs.ToArray(), errors.ToArray());
 		}
 	}
 
@@ -334,5 +304,28 @@ namespace ParseFlags
 
 		internal static Arg CreateForArrayElement(Arg arrayArg, string elementValue)
 			=> new Arg(arrayArg.Raw, arrayArg.RawTrimmed, arrayArg.Key, arrayArg.Path, elementValue);
+	}
+
+	abstract class AssignmentTarget { }
+	class PropertyTarget : AssignmentTarget
+	{
+		public PropertyInfo Property { get; }
+
+		public PropertyTarget(PropertyInfo property)
+		{
+			Property = property;
+		}
+	}
+	class ArrayTarget : AssignmentTarget
+	{
+		public PropertyInfo ArrayProperty { get; }
+		public Type ElementType { get; }
+		public int Index { get; }
+		public ArrayTarget(PropertyInfo arrayProperty, Type elementType, int index)
+		{
+			ArrayProperty = arrayProperty;
+			ElementType = elementType;
+			Index = index;
+		}
 	}
 }

@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
-    <RootNamespace>parse_flags</RootNamespace>
+    <RootNamespace>ParseFlags</RootNamespace>
     <AssemblyName>ParseFlags</AssemblyName>
   </PropertyGroup>
 
